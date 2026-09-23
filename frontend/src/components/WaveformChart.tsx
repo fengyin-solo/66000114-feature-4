@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useEEGStore } from '../store/eeg';
 import { EEGData, BandPower, BrainState, CorrelationData } from '../types';
+import { normalizeCorrelation, errorData } from '../utils/correlation';
 import axios from 'axios';
 
 const CHANNEL_NAMES: Record<string, string> = {
@@ -78,63 +79,51 @@ const computeBrainState = (bands: BandPower): BrainState => {
   };
 };
 
-const computeCorrelation = (targetChannel: string, eegData: EEGData): CorrelationData => {
-  const targetData = eegData.data[targetChannel];
-  const correlations = ALL_CHANNELS.map(ch => {
-    if (ch === targetChannel) {
-      return { channel: ch, targetChannel, correlation: 1.0, coherence: 1.0 };
-    }
-    const chData = eegData.data[ch];
-    let sumXY = 0, sumX = 0, sumY = 0, sumX2 = 0, sumY2 = 0;
-    const n = targetData.length;
-    for (let i = 0; i < n; i++) {
-      sumXY += targetData[i] * chData[i];
-      sumX += targetData[i];
-      sumY += chData[i];
-      sumX2 += targetData[i] * targetData[i];
-      sumY2 += chData[i] * chData[i];
-    }
-    const corr = (n * sumXY - sumX * sumY) /
-      Math.sqrt((n * sumX2 - sumX * sumX) * (n * sumY2 - sumY * sumY));
-    return {
-      channel: ch,
-      targetChannel,
-      correlation: Math.round(corr * 10000) / 10000,
-      coherence: Math.round((0.3 + Math.random() * 0.5) * 10000) / 10000,
-    };
-  });
-  return { targetChannel, correlations };
-};
-
 export const WaveformChart: React.FC = () => {
   const {
     eegData, selectedChannel, setEEGData, setBandPower, setBrainState, setCorrelationData,
-    isRecording, addRecordingFrame, playbackMode,
+    isRecording, addRecordingFrame, playbackMode, setCorrelationLoading, refreshTick,
   } = useEEGStore();
   const [loading, setLoading] = useState(false);
   const intervalRef = useRef<number | null>(null);
+  const fetchTokenRef = useRef(0);
+  const prevChannelRef = useRef<string | null>(null);
 
   const fetchEEG = async () => {
     const state = useEEGStore.getState();
     if (state.playbackMode) return;
+    const token = ++fetchTokenRef.current;
+    const channel = state.selectedChannel;
+    // 仅在通道切换时清空旧结论；同一通道周期刷新保留上一帧结果直到新结果到达，避免闪烁
+    const switched = prevChannelRef.current !== null && prevChannelRef.current !== channel;
+    if (switched) state.setCorrelationLoading(true);
     setLoading(true);
     let eeg: EEGData, bands: BandPower, brainState: BrainState, correlation: CorrelationData;
     try {
-      const { data } = await axios.get(`/api/eeg/sample/${state.selectedChannel}?duration=3`);
+      const { data } = await axios.get(`/api/eeg/sample/${channel}?duration=3`);
+      // 快速连续切换通道时丢弃过期响应，避免旧通道结果覆盖新通道
+      if (token !== fetchTokenRef.current || useEEGStore.getState().selectedChannel !== channel) return;
       eeg = data.eeg;
       bands = data.bands;
       brainState = data.brainState;
-      correlation = data.correlation;
+      if (data?.error || !data?.correlation) {
+        correlation = errorData(channel, 'compute_failed', `相关分析计算失败：${data?.error || '接口未返回相关数据'}，本通道暂无可对比结论。`);
+      } else {
+        correlation = normalizeCorrelation(data.correlation, channel);
+      }
     } catch {
+      // 后端不可用时波形等仍可离线演示；相关结论无法伪造，显式标记失败而不是沿用上一通道
+      if (token !== fetchTokenRef.current || useEEGStore.getState().selectedChannel !== channel) return;
       eeg = generateMockEEG(3);
       bands = computeBandPower();
       brainState = computeBrainState(bands);
-      correlation = computeCorrelation(state.selectedChannel, eeg);
+      correlation = errorData(channel, 'compute_failed', '相关分析服务不可用（后端请求失败，当前为离线演示数据），无法计算通道间相关性与相干性。');
     }
     state.setEEGData(eeg);
     state.setBandPower(bands);
     state.setBrainState(brainState);
-    state.setCorrelationData(correlation);
+    state.setCorrelationData({ ...correlation, timestamp: Date.now() });
+    prevChannelRef.current = channel;
     if (state.isRecording) {
       state.addRecordingFrame(eeg, bands, brainState, correlation);
     }
@@ -147,14 +136,17 @@ export const WaveformChart: React.FC = () => {
         clearInterval(intervalRef.current);
         intervalRef.current = null;
       }
+      setCorrelationLoading(false);
       return;
     }
     fetchEEG();
     intervalRef.current = window.setInterval(fetchEEG, 3000);
     return () => {
+      fetchTokenRef.current++;
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
-  }, [selectedChannel, playbackMode]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedChannel, playbackMode, refreshTick]);
 
   const chartData = eegData?.data[selectedChannel]?.map((v: number, i: number) => ({
     t: eegData.time[i]?.toFixed(3), value: v.toFixed(4)

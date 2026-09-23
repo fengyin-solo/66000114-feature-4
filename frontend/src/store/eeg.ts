@@ -1,7 +1,16 @@
 import { create } from 'zustand';
-import { EEGData, BandPower, BrainState, CorrelationData, Recording, RecordingFrame, PlaybackState } from '../types';
+import { EEGData, BandPower, BrainState, CorrelationData, CorrelationFilter, Recording, RecordingFrame, PlaybackState } from '../types';
 
 const STORAGE_KEY = 'eeg_recordings';
+const FILTER_STORAGE_KEY = 'eeg_correlation_filter';
+
+const DEFAULT_FILTER: CorrelationFilter = {
+  metric: 'correlation',
+  threshold: 50,
+  sortDirection: 'desc',
+  highlightedChannel: null,
+  detailChannel: null,
+};
 
 const loadRecordings = (): Recording[] => {
   try {
@@ -18,6 +27,33 @@ const saveRecordings = (recordings: Recording[]) => {
   } catch {}
 };
 
+/** 读取上次使用的筛选/对比条件（阈值、排序、高亮、详情对象），非法时回退默认值 */
+const loadFilter = (): CorrelationFilter => {
+  try {
+    const stored = localStorage.getItem(FILTER_STORAGE_KEY);
+    if (!stored) return DEFAULT_FILTER;
+    const parsed = JSON.parse(stored);
+    const threshold = typeof parsed.threshold === 'number' && parsed.threshold >= 0 && parsed.threshold <= 100
+      ? parsed.threshold
+      : DEFAULT_FILTER.threshold;
+    return {
+      metric: parsed.metric === 'coherence' ? 'coherence' : 'correlation',
+      threshold,
+      sortDirection: parsed.sortDirection === 'asc' ? 'asc' : 'desc',
+      highlightedChannel: typeof parsed.highlightedChannel === 'string' ? parsed.highlightedChannel : null,
+      detailChannel: typeof parsed.detailChannel === 'string' ? parsed.detailChannel : null,
+    };
+  } catch {
+    return DEFAULT_FILTER;
+  }
+};
+
+const saveFilter = (filter: CorrelationFilter) => {
+  try {
+    localStorage.setItem(FILTER_STORAGE_KEY, JSON.stringify(filter));
+  } catch {}
+};
+
 interface EEGState {
   eegData: EEGData | null;
   selectedChannel: string;
@@ -25,6 +61,11 @@ interface EEGState {
   isStreaming: boolean;
   brainState: BrainState | null;
   correlationData: CorrelationData | null;
+  /** 相关分析是否正在计算（切换通道后结果到达前不沿用上一通道结论） */
+  correlationLoading: boolean;
+  correlationFilter: CorrelationFilter;
+  /** 手动请求重新计算相关分析的递增信号（失败重试） */
+  refreshTick: number;
   isRecording: boolean;
   recordingStartTime: number;
   currentRecordingFrames: RecordingFrame[];
@@ -38,6 +79,10 @@ interface EEGState {
   setStreaming: (v: boolean) => void;
   setBrainState: (s: BrainState | null) => void;
   setCorrelationData: (c: CorrelationData | null) => void;
+  setCorrelationLoading: (v: boolean) => void;
+  setCorrelationFilter: (patch: Partial<CorrelationFilter>) => void;
+  resetCorrelationFilter: () => void;
+  requestCorrelationRefresh: () => void;
   startRecording: () => void;
   stopRecording: (name: string) => void;
   addRecordingFrame: (eeg: EEGData, bands: BandPower, brainState: BrainState, correlation: CorrelationData) => void;
@@ -56,6 +101,9 @@ export const useEEGStore = create<EEGState>((set, get) => ({
   isStreaming: false,
   brainState: null,
   correlationData: null,
+  correlationLoading: true,
+  correlationFilter: loadFilter(),
+  refreshTick: 0,
   isRecording: false,
   recordingStartTime: 0,
   currentRecordingFrames: [],
@@ -72,7 +120,18 @@ export const useEEGStore = create<EEGState>((set, get) => ({
   setBandPower: (b) => set({ bandPower: b }),
   setStreaming: (v) => set({ isStreaming: v }),
   setBrainState: (s) => set({ brainState: s }),
-  setCorrelationData: (c) => set({ correlationData: c }),
+  setCorrelationData: (c) => set({ correlationData: c, correlationLoading: false }),
+  setCorrelationLoading: (v) => set({ correlationLoading: v }),
+  setCorrelationFilter: (patch) => {
+    const next = { ...get().correlationFilter, ...patch };
+    saveFilter(next);
+    set({ correlationFilter: next });
+  },
+  resetCorrelationFilter: () => {
+    saveFilter(DEFAULT_FILTER);
+    set({ correlationFilter: DEFAULT_FILTER });
+  },
+  requestCorrelationRefresh: () => set({ refreshTick: get().refreshTick + 1, correlationLoading: true }),
   startRecording: () => {
     const { selectedChannel } = get();
     set({
@@ -140,6 +199,7 @@ export const useEEGStore = create<EEGState>((set, get) => ({
       bandPower: recording.frames[0].bands,
       brainState: recording.frames[0].brainState,
       correlationData: recording.frames[0].correlation,
+      correlationLoading: false,
     });
   },
   exitPlaybackMode: () => {
@@ -176,6 +236,7 @@ export const useEEGStore = create<EEGState>((set, get) => ({
       bandPower: frame.bands,
       brainState: frame.brainState,
       correlationData: frame.correlation,
+      correlationLoading: false,
     });
   },
   togglePlayback: () => {

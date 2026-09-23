@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useEEGStore } from '../store/eeg';
 import { Recording } from '../types';
+import { normalizeCorrelation, correlationPct } from '../utils/correlation';
 
 const CHANNEL_NAMES: Record<string, string> = {
   Fp1: '左前额', Fp2: '右前额', F3: '左额', F4: '右额',
@@ -347,15 +348,32 @@ export const RecordingPanel: React.FC = () => {
                 background: 'rgba(255,255,255,0.5)',
                 borderRadius: '6px',
               }}>
-                <span style={{ fontSize: '11px', color: '#666', fontWeight: 500 }}>相关度:</span>
-                {playbackState.currentFrame?.correlation.correlations
-                  .filter(c => c.channel !== playbackState.currentFrame?.correlation.targetChannel)
-                  .slice(0, 3)
-                  .map((c, i) => (
-                    <span key={i} style={{ fontSize: '11px', color: '#6a1b9a' }}>
-                      {c.channel}: {(Math.abs(c.correlation) * 100).toFixed(0)}%
-                    </span>
-                  ))}
+                {(() => {
+                  const frame = playbackState.currentFrame;
+                  if (!frame) return null;
+                  const corr = normalizeCorrelation(frame.correlation, frame.correlation.targetChannel || activeRecording.channel);
+                  if (corr.error) {
+                    return <span style={{ fontSize: '11px', color: '#b71c1c' }}>相关分析：{corr.error.message}</span>;
+                  }
+                  const top = corr.correlations
+                    .filter(c => c.channel !== corr.targetChannel && Number.isFinite(c.correlation))
+                    .sort((a, b) => correlationPct(b) - correlationPct(a))
+                    .slice(0, 3);
+                  return (
+                    <>
+                      <span style={{ fontSize: '11px', color: '#666', fontWeight: 500 }}>
+                        相关度（相对 {corr.targetChannel}）:
+                      </span>
+                      {top.map((c) => (
+                        <span key={c.channel} style={{ fontSize: '11px', color: '#6a1b9a' }}>
+                          {c.channel}: {correlationPct(c).toFixed(0)}%
+                          {c.correlation < 0 && <span style={{ color: '#b71c1c' }}> (负)</span>}
+                          {c.coherence === null && <span style={{ color: '#b26a00' }}> · 相干缺失</span>}
+                        </span>
+                      ))}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           )}

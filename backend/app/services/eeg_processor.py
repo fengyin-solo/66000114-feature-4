@@ -63,7 +63,16 @@ def compute_brain_state(channel_data: list, sample_rate: int) -> dict:
     }
 
 def compute_correlation(target_channel: str, all_data: dict, sample_rate: int) -> dict:
-    target_data = np.array(all_data[target_channel])
+    if target_channel not in all_data:
+        return {
+            'targetChannel': target_channel,
+            'correlations': [],
+            'error': {
+                'reason': 'compute_failed',
+                'message': f'目标通道 {target_channel} 不存在，无法计算通道相关性。'
+            }
+        }
+    target_data = np.array(all_data[target_channel], dtype=float)
     correlations = []
     for ch in CHANNELS:
         if ch == target_channel:
@@ -74,15 +83,64 @@ def compute_correlation(target_channel: str, all_data: dict, sample_rate: int) -
                 'coherence': 1.0
             })
             continue
-        ch_data = np.array(all_data[ch])
+        if ch not in all_data:
+            # 通道数据缺失：相关性/相干性不可用，前端需明确说明而不是编造数值
+            correlations.append({
+                'channel': ch,
+                'targetChannel': target_channel,
+                'correlation': None,
+                'coherence': None
+            })
+            continue
+        ch_data = np.array(all_data[ch], dtype=float)
+
         corr = float(np.corrcoef(target_data, ch_data)[0, 1])
-        f, coh = signal.coherence(target_data, ch_data, fs=sample_rate, nperseg=128)
-        alpha_mask = (f >= 8) & (f <= 13)
-        mean_coh = float(np.mean(coh[alpha_mask])) if alpha_mask.any() else 0.0
+        corr = round(corr, 4) if np.isfinite(corr) else None
+
+        coh_value = None
+        try:
+            f, coh = signal.coherence(target_data, ch_data, fs=sample_rate, nperseg=128)
+            alpha_mask = (f >= 8) & (f <= 13)
+            if alpha_mask.any():
+                mean_coh = float(np.mean(coh[alpha_mask]))
+                coh_value = round(mean_coh, 4) if np.isfinite(mean_coh) else None
+        except Exception:
+            coh_value = None
+
         correlations.append({
             'channel': ch,
             'targetChannel': target_channel,
-            'correlation': round(corr, 4),
-            'coherence': round(mean_coh, 4)
+            'correlation': corr,
+            'coherence': coh_value
         })
+
+    other = [c for c in correlations if c['channel'] != target_channel]
+    valid = [c for c in other if c['correlation'] is not None]
+    if not other:
+        return {
+            'targetChannel': target_channel,
+            'correlations': correlations,
+            'error': {
+                'reason': 'empty_result',
+                'message': '相关分析结果为空：没有其他通道可用于对比。'
+            }
+        }
+    if not valid:
+        return {
+            'targetChannel': target_channel,
+            'correlations': correlations,
+            'error': {
+                'reason': 'compute_failed',
+                'message': '所有通道的相关系数均无法计算（信号长度不足或含无效值），请检查采集数据。'
+            }
+        }
+    if all(c['coherence'] is None for c in other):
+        return {
+            'targetChannel': target_channel,
+            'correlations': correlations,
+            'error': {
+                'reason': 'coherence_missing',
+                'message': 'Alpha 相干性计算缺失（信号长度不足），相关性结果仍可使用。'
+            }
+        }
     return {'targetChannel': target_channel, 'correlations': correlations}
