@@ -9,14 +9,27 @@ export interface BrainState {
   statusColor: string;
   timestamp: number;
 }
+export type CorrelationStatus = 'ok' | 'empty' | 'error';
+
 export interface ChannelCorrelation {
   channel: string;
   targetChannel: string;
-  correlation: number;
-  coherence: number;
+  /** 相关系数 [-1, 1]；无法计算时为 null */
+  correlation: number | null;
+  /** Alpha 频段相干性 [0, 1]；缺失时为 null */
+  coherence: number | null;
+  /** 该条目无法计算或部分指标缺失时的原因码 */
+  reasonCode?: string;
+  /** 原因的中文说明 */
+  reasonLabel?: string;
 }
 export interface CorrelationData {
   targetChannel: string;
+  status?: CorrelationStatus;
+  reasonCode?: string;
+  reasonLabel?: string;
+  /** 服务端计算完成的时间戳（毫秒） */
+  computedAt?: number;
   correlations: ChannelCorrelation[];
 }
 

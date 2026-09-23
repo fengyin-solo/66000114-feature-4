@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useEEGStore } from '../store/eeg';
 import { Recording } from '../types';
+import { applyFilter } from '../utils/correlation';
 
 const CHANNEL_NAMES: Record<string, string> = {
   Fp1: '左前额', Fp2: '右前额', F3: '左额', F4: '右额',
@@ -47,6 +48,24 @@ export const RecordingPanel: React.FC = () => {
   const [elapsedTime, setElapsedTime] = useState(0);
   const timerRef = useRef<number | null>(null);
   const playbackTimerRef = useRef<number | null>(null);
+
+  // 回放摘要与主面板共用同一筛选条件（阈值、排序等持久化状态）
+  const { correlationData: liveCorrelationData, correlationFilter } = useEEGStore();
+  const playbackView = useMemo(() => {
+    if (!playbackMode || !liveCorrelationData || liveCorrelationData.status === 'error') {
+      return { hits: [], missing: [] as string[] };
+    }
+    const view = applyFilter(liveCorrelationData, { ...correlationFilter, onlyHits: false, onlyAnomalies: false });
+    return {
+      hits: view.hits,
+      missing: view.rows.filter(r => r.coherenceMissing).map(r => r.channel),
+    };
+  }, [playbackMode, liveCorrelationData, correlationFilter]);
+  const playbackHits = playbackView.hits
+    .filter((c): c is typeof c & { score: number } => c.score !== null)
+    .slice(0, 3);
+  const missingCoherence = playbackView.missing;
+  const threshold = correlationFilter.threshold;
 
   useEffect(() => {
     if (isRecording) {
@@ -347,15 +366,20 @@ export const RecordingPanel: React.FC = () => {
                 background: 'rgba(255,255,255,0.5)',
                 borderRadius: '6px',
               }}>
-                <span style={{ fontSize: '11px', color: '#666', fontWeight: 500 }}>相关度:</span>
-                {playbackState.currentFrame?.correlation.correlations
-                  .filter(c => c.channel !== playbackState.currentFrame?.correlation.targetChannel)
-                  .slice(0, 3)
-                  .map((c, i) => (
-                    <span key={i} style={{ fontSize: '11px', color: '#6a1b9a' }}>
-                      {c.channel}: {(Math.abs(c.correlation) * 100).toFixed(0)}%
+                <span style={{ fontSize: '11px', color: '#666', fontWeight: 500 }}>
+                  相关度（阈值 {threshold}%）:
+                </span>
+                {playbackHits.length > 0 ? playbackHits.map((c, i) => (
+                    <span key={i} style={{ fontSize: '11px', color: c.score >= 95 ? '#c62828' : '#6a1b9a', fontWeight: c.score >= 95 ? 700 : 400 }}>
+                      {c.channel}: {c.score.toFixed(0)}%{c.score >= 95 ? ' 🚨' : ''}
                     </span>
-                  ))}
+                  ))
+                  : <span style={{ fontSize: '11px', color: '#999' }}>当前阈值下无命中通道</span>}
+                {missingCoherence.length > 0 && (
+                  <span style={{ fontSize: '11px', color: '#c62828' }}>
+                    相干性缺失: {missingCoherence.join(', ')}
+                  </span>
+                )}
               </div>
             </div>
           )}

@@ -32,7 +32,13 @@ async def spectrogram(channel: str):
 async def correlation(channel: str, duration: float = 3.0):
     data = generate_mock_eeg(duration)
     if channel not in data['data']:
-        return {'error': 'Channel not found'}
+        return {
+            'targetChannel': channel,
+            'status': 'error',
+            'reasonCode': 'CHANNEL_NOT_FOUND',
+            'reasonLabel': f'通道 {channel} 不存在',
+            'correlations': [],
+        }
     return compute_correlation(channel, data['data'], SAMPLE_RATE)
 
 @router.get("/channels")

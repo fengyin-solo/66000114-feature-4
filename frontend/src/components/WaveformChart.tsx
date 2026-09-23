@@ -108,7 +108,8 @@ const computeCorrelation = (targetChannel: string, eegData: EEGData): Correlatio
 
 export const WaveformChart: React.FC = () => {
   const {
-    eegData, selectedChannel, setEEGData, setBandPower, setBrainState, setCorrelationData,
+    eegData, selectedChannel, setEEGData, setBandPower, setBrainState,
+    beginCorrelationLoad, setCorrelationResult, setCorrelationLoadError,
     isRecording, addRecordingFrame, playbackMode,
   } = useEEGStore();
   const [loading, setLoading] = useState(false);
@@ -117,24 +118,41 @@ export const WaveformChart: React.FC = () => {
   const fetchEEG = async () => {
     const state = useEEGStore.getState();
     if (state.playbackMode) return;
+    const requestChannel = state.selectedChannel;
     setLoading(true);
+    beginCorrelationLoad(requestChannel);
     let eeg: EEGData, bands: BandPower, brainState: BrainState, correlation: CorrelationData;
     try {
-      const { data } = await axios.get(`/api/eeg/sample/${state.selectedChannel}?duration=3`);
+      const { data } = await axios.get(`/api/eeg/sample/${requestChannel}?duration=3`);
       eeg = data.eeg;
       bands = data.bands;
       brainState = data.brainState;
       correlation = data.correlation;
     } catch {
-      eeg = generateMockEEG(3);
-      bands = computeBandPower();
-      brainState = computeBrainState(bands);
-      correlation = computeCorrelation(state.selectedChannel, eeg);
+      try {
+        eeg = generateMockEEG(3);
+        bands = computeBandPower();
+        brainState = computeBrainState(bands);
+        correlation = computeCorrelation(requestChannel, eeg);
+      } catch {
+        // 仅当用户仍停留在发起请求的通道时才落地错误，避免旧请求覆盖新通道状态
+        if (useEEGStore.getState().selectedChannel === requestChannel) {
+          setCorrelationLoadError('网络请求失败，无法获取相关分析结果');
+        }
+        setLoading(false);
+        return;
+      }
+    }
+    // 响应返回时若用户已切走通道，丢弃本次结果（不能让旧通道结论出现在新通道上）
+    if (useEEGStore.getState().selectedChannel !== requestChannel) {
+      setLoading(false);
+      return;
     }
     state.setEEGData(eeg);
     state.setBandPower(bands);
     state.setBrainState(brainState);
-    state.setCorrelationData(correlation);
+    // 归一化 + 按结果自身 status 决定成功/失败/为空，不沿用上一通道结论
+    setCorrelationResult(correlation);
     if (state.isRecording) {
       state.addRecordingFrame(eeg, bands, brainState, correlation);
     }
@@ -151,8 +169,11 @@ export const WaveformChart: React.FC = () => {
     }
     fetchEEG();
     intervalRef.current = window.setInterval(fetchEEG, 3000);
+    const onManualRefresh = () => fetchEEG();
+    window.addEventListener('eeg:refresh-correlation', onManualRefresh);
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      window.removeEventListener('eeg:refresh-correlation', onManualRefresh);
     };
   }, [selectedChannel, playbackMode]);
 
